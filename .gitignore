@@ -6,6 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
+*.html linguist-language=Python
+
 # Distribution / packaging
 .Python
 env/
