@@ -36,11 +36,11 @@ server <- function(input, output) {
   interm <- eventReactive(input$run, {
     
     ## using bash to call .py script
-    print(str_c('python3.5 ~/imdb/app/Untitled.py --words=', input$words,' --clusters=', input$clust))
-    system(str_c('python3.5 ~/imdb/app/Untitled.py --words=', input$words,' --clusters=', input$clust))
+    print(str_c('python3.5 /home/ruser/imdb/app/Untitled.py --words=', input$words,' --clusters=', input$clust))
+    system(str_c('python3.5 /home/ruser/imdb/app/Untitled.py --words=', input$words,' --clusters=', input$clust))
     
     
-    tsne_df = read_csv("~/imdb/data/tsne_df.csv")
+    tsne_df = read_csv("/home/ruser/imdb/data/tsne_df.csv")
     tsne_df$cluster %<>% as.character()
     return(tsne_df)
   }) 
