@@ -1,0 +1,241 @@
+---
+title: "3_doc2vec__revised"
+output: html_document
+---
+
+
+```{r}
+
+library(stringi)
+library(data.table)
+library(magrittr)
+library(purrr)
+library(readr)
+library(dplyr)
+
+library(text2vec)
+library(lime)
+library(xgboost)
+
+
+set.seed(10)
+
+```
+
+## Motivation
+### [LSA outperforms word2vec on small datasets][https://arxiv.org/pdf/1610.01520.pdf]
+
+
+### Train
+
+```{r}
+
+scrapped = read_csv("~/doc2vec/train_scrapped/main.csv")
+scrapped_meta = read_csv("~/doc2vec/train_scrapped/l_pd_main.csv")
+
+scrapped = scrapped %>% dplyr::select(source = urls, status, movie)
+scrapped = scrapped[!is.na(scrapped$movie),]
+
+ratings = inner_join(scrapped, 
+                  scrapped_meta %>% dplyr::select(movie = paper_name, rating),
+           by = c("movie"))
+
+texts = read_csv("~/doc2vec/df_texts_train.csv")
+
+
+full_train = inner_join(ratings, texts, by = c("source" = "url"))
+full_train = full_train[!duplicated(full_train$path),]
+
+
+# full %>% apply(2, function(x) sum(is.na(x)))
+summary(full_train$rating)
+
+full_train$rating_bin = ifelse(full_train$rating <= 8.1, "low", "high")
+
+full_train$rating_bin %>% as.factor() %>% summary()
+
+
+write_csv("~/imdb/data/df_tagged_real_train.csv", x = full_train)
+
+```
+
+
+## Test
+
+```{r}
+
+scrapped = read_csv("~/doc2vec/test_scrapped/main.csv")
+scrapped_meta = read_csv("~/doc2vec/test_scrapped/l_pd_main.csv")
+
+scrapped = scrapped %>% dplyr::select(source = urls, status, movie)
+scrapped = scrapped[!is.na(scrapped$movie),]
+
+ratings = inner_join(scrapped, 
+                  scrapped_meta %>% dplyr::select(movie = paper_name, rating),
+           by = c("movie"))
+
+
+texts = read_csv("~/doc2vec/df_texts_test.csv") #
+
+
+full_test = inner_join(ratings, texts, by = c("source" = "url"))
+full_test = full_test[!duplicated(full_test$path),]
+
+
+# full_test %>% apply(2, function(x) sum(is.na(x)))
+
+full_test$rating_bin = ifelse(full_test$rating <= 8.1, "low", "high")
+summary(full_test$rating_bin %>% as.factor())
+
+
+write_csv("~/imdb/data/df_tagged_real_test.csv", x = full_test)
+
+```
+
+
+```{r}
+
+train_sentences = full_train
+test_sentences = full_test
+
+# stop_words = data("stop_words_sentences")
+
+
+label_to_explain = "high" # value of variable to explain
+
+
+```
+
+
+## label train set and test set
+
+```{r}
+
+data.table::setDT(train_sentences)
+data.table::setDT(test_sentences)
+
+train_sentences[, label := rating_bin == label_to_explain]
+test_sentences[, label := rating_bin == label_to_explain]
+
+```
+
+
+```{r}
+
+get.iterator = function(data) itoken(data, preprocess_function = tolower, tokenizer = word_tokenizer, progressbar = F)
+
+# Extract vocabulary
+v = text2vec::create_vocabulary(get.iterator(train_sentences$text))
+
+# Function to transform text in matrix
+
+get.matrix = function(data) {
+  i <- get.iterator(data)
+  create_dtm(i, vocab_vectorizer(v))
+}
+
+lsa.full.text = LSA$new(n_topics = 100)
+tfidf = TfIdf$new()
+invisible(get.matrix(train_sentences$text) %>% tfidf$fit_transform())
+invisible(get.matrix(train_sentences$text) %>% transform(tfidf) %>% 
+            lsa.full.text$fit_transform(fastpath = FALSE))
+
+add.lsa = function(m, lsa) {
+  l <- transform(m, lsa)
+  colnames(l) <- ncol(l) %>% seq() %>% paste0("lsa.", .)
+  cbind2(m, l)
+}
+
+
+```
+
+
+
+```{r}
+
+dtrain = get.matrix(train_sentences$text) %>% 
+  transform(tfidf) %>% 
+  add.lsa(lsa.full.text) %>% 
+  xgb.DMatrix(label = train_sentences$label)
+
+dtest = get.matrix(test_sentences$text) %>% 
+  transform(tfidf) %>% 
+  add.lsa(lsa.full.text) %>% 
+  xgb.DMatrix(label = test_sentences$label)
+
+
+```
+
+
+```{r}
+
+watchlist = list(train = dtrain, eval = dtest)
+param = list(max_depth = 15, eta = 0.1, objective = "binary:logistic", eval_metric = "error", nthread = 1)
+bst = xgb.train(param, 
+                 dtrain, #
+                 nrounds = 1000, 
+                 watchlist, 
+                 early_stopping_rounds = 100)
+
+
+```
+
+
+Generally, it can be seen from the eval-error rate and from results, that predictions are quite a bit better than flipping a coin. 
+
+```{r}
+
+test_sentences[,prediction := predict(bst, dtest, type = "prob") > 0.5]
+test_sentences[label == T, sum(label != prediction)]
+test_sentences[label == T, sum(label == prediction)]
+test_sentences[, sum(label == prediction)/length(label)]
+test_sentences[, mean(label)]
+
+
+```
+
+
+```{r}
+
+get.features.matrix = . %>%  
+  get.matrix() %>%
+  transform(tfidf) %>%
+  add.lsa(lsa.full.text) %>%
+  xgb.DMatrix()
+
+```
+
+
+```{r}
+
+sentences_to_explain = test_sentences[label == T][1:10, text]
+
+```
+
+
+```{r}
+
+load("~/doc2vec/doc2vec_ALT.Rdata")
+# save.image("~/doc2vec/doc2vec_ALT.Rdata")
+
+```
+
+
+
+```{r}
+
+results = lime::lime(sentences_to_explain, bst, preprocess = get.features.matrix, 
+                            keep_word_position = FALSE, bin_continuous = T)
+
+explanation = lime::explain(x = sentences_to_explain, 
+                             explainer = results, n_features = 4,  n_labels = 1)
+
+
+```
+
+
+```{r}
+
+plot_features(explanation, ncol = 4)
+
+```
